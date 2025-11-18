@@ -1,3 +1,30 @@
-<Solution>
-  <Project Path="lab1-1/lab1-1.csproj" />
-</Solution>
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+namespace LR_One
+{
+    class Program
+    {
+        static void Main()
+        {
+            Console.WriteLine("Название и номер лабораторной работы: Лабораторная работа 1. Разработка консольного приложения.");
+            Console.WriteLine("ФИО студента: Соловьев Степан Русланович");
+            Console.WriteLine("Группа студента и шифр специальности: ИДБ-23-01 09.03.01");
+            Console.WriteLine("Дата рождения студента: 13.01.2006");
+            Console.WriteLine("Населенный пункт постоянного места жительства студента: Московская область, город Пущино");
+            Console.WriteLine("Любимый предмет в школе: Литература");
+            Console.WriteLine("Краткое описание увлечений, хобби, интересов: Люблю компьютерные игры, кинематограф, географию и философию");
+
+            float k1 = 1.1f;
+            float k2 = 2.2f;
+            float k3 = 3.3f;
+
+            Console.WriteLine("");
+            float H = k1 + k2 - k3 + k1 * k2 / k3;
+            Console.WriteLine($"{k1}+{k2}-{k3}+{k1}*{k2}/{k3}={H}");
+            Console.ReadKey();
+        }
+    }
+}
