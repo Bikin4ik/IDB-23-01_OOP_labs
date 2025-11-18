@@ -1,3 +1,95 @@
-<Solution>
-  <Project Path="lab1-3/lab1-3.csproj" />
-</Solution>
+using System;
+using System.Globalization;
+using System.IO;
+
+namespace Lab3Var19
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            TextWriter save_out = Console.Out;
+            TextReader save_in = Console.In;
+
+            StreamWriter new_out = new StreamWriter(@"output.txt");
+            StreamReader new_in = new StreamReader(@"input.txt");
+
+            Console.SetOut(new_out);
+            Console.SetIn(new_in);
+
+            int t = Convert.ToInt32(Console.ReadLine(), CultureInfo.InvariantCulture); 
+            int N = Convert.ToInt32(Console.ReadLine(), CultureInfo.InvariantCulture); 
+            double X = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture); 
+            double Y = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture); 
+
+            double Z = 0; 
+
+            if (t == 0) 
+            {
+                for (int i = 1; i <= N; i++)
+                {
+                    double term = CalculateTerm(i, X, Y);
+                    Z += term;
+                }
+            }
+            else if (t == 1)
+            {
+                int i = 1;
+                while (i <= N)
+                {
+                    double term = CalculateTerm(i, X, Y);
+                    Z += term;
+                    i++;
+                }
+            }
+            else if (t == 2)
+            {
+                int i = 1;
+                do
+                {
+                    double term = CalculateTerm(i, X, Y);
+                    Z += term;
+                    i++;
+                } while (i <= N);
+            }
+
+            Console.WriteLine(String.Format("{0:0.0000000}", Z));
+
+            Console.SetOut(save_out);
+            Console.SetIn(save_in);
+
+            new_out.Close();
+            new_in.Close();
+        }
+
+        static double CalculateTerm(int i, double X, double Y)
+        {
+            long factorial = Factorial(i);
+
+            double sign = (i % 2 == 1) ? 1.0 : -1.0;
+
+            double numerator;
+            if (i % 2 == 1)
+            {
+                numerator = Math.Pow(Math.Cos(X), i) + Math.Abs(Y);
+            }
+            else
+            {
+                numerator = Math.Pow(Math.Cos(Y), i) + Math.Abs(X);
+            }
+
+            double term = sign * numerator / factorial;
+            return term;
+        }
+
+        static long Factorial(int n)
+        {
+            long result = 1;
+            for (int i = 1; i <= n; i++)
+            {
+                result *= i;
+            }
+            return result;
+        }
+    }
+}
