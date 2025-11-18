@@ -1,3 +1,51 @@
-<Solution>
-  <Project Path="lab1-2/lab1-2.csproj" />
-</Solution>
+using System;
+using System.IO;
+using System.Globalization;
+
+class Program
+{
+    static void Main()
+    {
+        TextWriter save_out = Console.Out;
+        TextReader save_in = Console.In;
+        var new_out = new StreamWriter(@"output.txt");
+        var new_in = new StreamReader(@"numbers.txt");
+        Console.SetOut(new_out);
+        Console.SetIn(new_in);
+
+        double a, b, c, d, e;
+        double s, k;
+
+        a = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture);
+        b = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture);
+        c = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture);
+        d = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture);
+        e = Convert.ToDouble(Console.ReadLine(), CultureInfo.InvariantCulture);
+
+        if ((Math.Sqrt(a - 2 * c) + 1) == 0)
+        {
+            Console.WriteLine("Error");
+        }
+        else
+        {
+            s = (Math.Sqrt(4 * d - b + 1)) / (Math.Sqrt(a - 2 * c) + 1);
+            Console.WriteLine($"s={Math.Round(s, 4)}");
+        }
+
+        if (e == 0)
+        {
+            Console.WriteLine("Error");
+        }
+        else
+        {
+            k = (Math.Sqrt(a - Math.Sqrt(b - c))) / e;
+            Console.WriteLine($"k={Math.Round(k, 4)}");
+        }
+
+        Console.SetOut(save_out);
+        Console.SetIn(save_in);
+
+        new_out?.Close();
+        new_in?.Close();
+    }
+}
