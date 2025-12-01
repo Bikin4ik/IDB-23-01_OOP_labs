@@ -1,3 +1,711 @@
-<Solution>
-  <Project Path="lab2/lab2.csproj" />
-</Solution>
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+
+namespace OopMonitoringLab
+{
+    // ==========================
+    // 1. МОДЕЛЬ ЗАПРОСА И ОТВЕТА
+    // ==========================
+    public class Request
+    {
+        public string ServiceName { get; set; } = string.Empty;
+        public int PayloadSize { get; set; }
+        public int? DeadlineMs { get; set; }
+
+        public Request(string serviceName, int payloadSize, int? deadlineMs = null)
+        {
+            ServiceName = serviceName;
+            PayloadSize = payloadSize;
+            DeadlineMs = deadlineMs;
+        }
+    }
+
+    public class Response
+    {
+        public bool IsSuccess { get; set; }
+        public int LatencyMs { get; set; }
+        public string? ErrorCode { get; set; }
+        public string? ErrorMessage { get; set; }
+        public bool IsTimeout { get; set; }
+
+        public Response(bool isSuccess, int latencyMs, string? errorCode = null,
+                       string? errorMessage = null, bool isTimeout = false)
+        {
+            IsSuccess = isSuccess;
+            LatencyMs = latencyMs;
+            ErrorCode = errorCode;
+            ErrorMessage = errorMessage;
+            IsTimeout = isTimeout;
+        }
+    }
+
+    // ======================
+    // 2. ИНТЕРФЕЙС СЕРВИСА
+    // ======================
+    public interface IService
+    {
+        string Name { get; }
+        int BaseLatencyMs { get; }
+        double FailureProbability { get; }
+        Response Process(Request request);
+    }
+
+    // =======================
+    // 3. БАЗОВЫЙ КЛАСС СЕРВИСА И ИНСТАНСЫ
+    // =======================
+    public abstract class ServiceBase : IService
+    {
+        private static readonly Random _random = new Random();
+
+        public string Name { get; protected set; }
+        public int BaseLatencyMs { get; protected set; }
+        public double FailureProbability { get; protected set; }
+
+        protected ServiceBase(string name, int baseLatencyMs, double failureProbability)
+        {
+            Name = name;
+            BaseLatencyMs = baseLatencyMs;
+            FailureProbability = failureProbability;
+        }
+
+        public abstract Response Process(Request request);
+
+        protected Response BaseProcess(Request request)
+        {
+            int randomLatency = _random.Next(-20, 50);
+            int simulatedLatency = Math.Max(10, BaseLatencyMs + randomLatency + request.PayloadSize / 10);
+
+            bool isTimeout = request.DeadlineMs.HasValue && simulatedLatency > request.DeadlineMs.Value;
+
+            if (!isTimeout)
+            {
+                Thread.Sleep(Math.Min(simulatedLatency, request.DeadlineMs ?? simulatedLatency));
+            }
+            else
+            {
+                Thread.Sleep(10);
+            }
+
+            Response response;
+
+            if (isTimeout)
+            {
+                response = new Response(false, simulatedLatency, "TIMEOUT",
+                                      $"Request exceeded deadline {request.DeadlineMs}ms (actual: {simulatedLatency}ms)",
+                                      true);
+            }
+            else
+            {
+                bool isSuccess = _random.NextDouble() > FailureProbability;
+
+                if (isSuccess)
+                {
+                    response = new Response(true, simulatedLatency);
+                }
+                else
+                {
+                    string errorCode = _random.NextDouble() > 0.5 ? "TIMEOUT" : "INTERNAL_ERROR";
+                    string errorMessage = errorCode == "TIMEOUT" ? "Service internal timeout" : "Internal server error";
+                    response = new Response(false, simulatedLatency, errorCode, errorMessage);
+                }
+            }
+
+            Log(request, response);
+            return response;
+        }
+
+        protected virtual void Log(Request request, Response response)
+        {
+            string status = response.IsSuccess ? "SUCCESS" : "FAILED";
+            string timeoutInfo = response.IsTimeout ? " [TIMEOUT]" : "";
+            string errorInfo = response.IsSuccess ? "" : $" ({response.ErrorCode})";
+            string deadlineInfo = request.DeadlineMs.HasValue ? $", deadline: {request.DeadlineMs}ms" : "";
+
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {Name} - {status}{timeoutInfo} - {response.LatencyMs}ms{deadlineInfo}{errorInfo}");
+        }
+    }
+
+    public class FastService : ServiceBase
+    {
+        public FastService(string? instanceSuffix = null)
+            : base($"FastService{(string.IsNullOrEmpty(instanceSuffix) ? "" : $"-{instanceSuffix}")}",
+                   baseLatencyMs: 50,
+                   failureProbability: 0.05)
+        {
+        }
+
+        public override Response Process(Request request)
+        {
+            return BaseProcess(request);
+        }
+    }
+
+    public class SlowService : ServiceBase
+    {
+        public SlowService(string? instanceSuffix = null)
+            : base($"SlowService{(string.IsNullOrEmpty(instanceSuffix) ? "" : $"-{instanceSuffix}")}",
+                   baseLatencyMs: 200,
+                   failureProbability: 0.15)
+        {
+        }
+
+        public override Response Process(Request request)
+        {
+            return BaseProcess(request);
+        }
+    }
+
+    public class AutoScalingManager
+    {
+        private readonly Dictionary<string, List<IService>> _serviceInstances = new();
+        private readonly Dictionary<string, int> _instanceCountHistory = new();
+        private int _roundRobinCounter = 0;
+
+        public int MaxInstancesPerService { get; set; } = 5;
+        public int MinInstancesPerService { get; set; } = 1;
+        public double ScaleUpLoadThreshold { get; set; } = 250.0;
+        public double ScaleDownLoadThreshold { get; set; } = 80.0;
+
+        public AutoScalingManager()
+        {
+            InitializeService("FastService", () => new FastService());
+            InitializeService("SlowService", () => new SlowService());
+        }
+
+        private void InitializeService(string serviceType, Func<IService> factory)
+        {
+            _serviceInstances[serviceType] = new List<IService> { factory() };
+            _instanceCountHistory[serviceType] = 1;
+        }
+
+        public IService GetServiceInstance(string serviceType)
+        {
+            if (!_serviceInstances.ContainsKey(serviceType) || _serviceInstances[serviceType].Count == 0)
+            {
+                throw new InvalidOperationException($"No instances available for {serviceType}");
+            }
+
+            var instances = _serviceInstances[serviceType];
+            var instance = instances[_roundRobinCounter % instances.Count];
+            _roundRobinCounter++;
+
+            return instance;
+        }
+
+        public List<IService> GetAllInstances(string serviceType)
+        {
+            return _serviceInstances.ContainsKey(serviceType) ?
+                new List<IService>(_serviceInstances[serviceType]) :
+                new List<IService>();
+        }
+
+        public int GetInstanceCount(string serviceType)
+        {
+            return _serviceInstances.ContainsKey(serviceType) ? _serviceInstances[serviceType].Count : 0;
+        }
+
+        public void PerformAutoScaling(string serviceType, double currentLoad, Dictionary<string, ServiceMetrics> metrics)
+        {
+            int currentCount = GetInstanceCount(serviceType);
+            int desiredCount = currentCount;
+
+            if (currentLoad > ScaleUpLoadThreshold && currentCount < MaxInstancesPerService)
+            {
+                desiredCount = currentCount + 1;
+                Console.WriteLine($"[AutoScaling] Высокая нагрузка ({currentLoad:F1} > {ScaleUpLoadThreshold}). " +
+                                $"Масштабируем {serviceType} вверх: {currentCount} -> {desiredCount} инстансов");
+            }
+            else if (currentLoad < ScaleDownLoadThreshold && currentCount > MinInstancesPerService)
+            {
+                desiredCount = currentCount - 1;
+                Console.WriteLine($"[AutoScaling] Низкая нагрузка ({currentLoad:F1} < {ScaleDownLoadThreshold}). " +
+                                $"Масштабируем {serviceType} вниз: {currentCount} -> {desiredCount} инстансов");
+            }
+
+            if (desiredCount != currentCount)
+            {
+                UpdateInstanceCount(serviceType, desiredCount, metrics);
+                _instanceCountHistory[serviceType] = desiredCount;
+            }
+        }
+
+        private void UpdateInstanceCount(string serviceType, int desiredCount, Dictionary<string, ServiceMetrics> metrics)
+        {
+            var instances = _serviceInstances[serviceType];
+            int currentCount = instances.Count;
+
+            if (desiredCount > currentCount)
+            {
+                for (int i = currentCount; i < desiredCount; i++)
+                {
+                    string instanceName = $"{serviceType}-Instance{i + 1}";
+                    IService newInstance = serviceType == "FastService"
+                        ? new FastService($"Instance{i + 1}")
+                        : new SlowService($"Instance{i + 1}");
+
+                    instances.Add(newInstance);
+
+                    if (metrics != null)
+                    {
+                        metrics[newInstance.Name] = new ServiceMetrics(newInstance.Name);
+                    }
+
+                    Console.WriteLine($"[AutoScaling] Создан новый инстанс: {newInstance.Name}");
+                }
+            }
+            else if (desiredCount < currentCount)
+            {
+                for (int i = currentCount - 1; i >= desiredCount && i > 0; i--)
+                {
+                    var instance = instances[i];
+                    instances.RemoveAt(i);
+
+                    if (metrics != null && metrics.ContainsKey(instance.Name))
+                    {
+                        metrics.Remove(instance.Name);
+                    }
+
+                    Console.WriteLine($"[AutoScaling] Удален инстанс: {instance.Name}");
+                }
+            }
+        }
+
+        public void PrintScalingHistory()
+        {
+            Console.WriteLine("\n=== ИСТОРИЯ ИЗМЕНЕНИЯ ИНСТАНСОВ ===");
+            foreach (var kvp in _instanceCountHistory)
+            {
+                int currentCount = GetInstanceCount(kvp.Key);
+                Console.WriteLine($"{kvp.Key}: начальное количество = {kvp.Value}, текущее количество = {currentCount}");
+            }
+        }
+    }
+
+    // ==============================
+    // 4. МЕТРИКИ И СБОР НАБЛЮДАЕМОСТИ
+    // ==============================
+    public class ServiceMetrics
+    {
+        public string ServiceName { get; }
+        public int TotalRequests { get; private set; }
+        public int SuccessfulRequests { get; private set; }
+        public int FailedRequests { get; private set; }
+        public int TimeoutRequests { get; private set; }
+        public int OtherErrorRequests { get; private set; }
+        public double AverageLatencyMs { get; private set; }
+        public int MaxLatencyMs { get; private set; }
+        public double TotalLoad { get; private set; }
+        public double AverageLoad { get; private set; }
+
+        private long _totalLatencySum;
+
+        public ServiceMetrics(string serviceName)
+        {
+            ServiceName = serviceName;
+        }
+
+        public double ErrorRate => TotalRequests == 0 ? 0.0 : (double)FailedRequests / TotalRequests;
+        public double TimeoutRate => TotalRequests == 0 ? 0.0 : (double)TimeoutRequests / TotalRequests;
+        public double OtherErrorRate => TotalRequests == 0 ? 0.0 : (double)OtherErrorRequests / TotalRequests;
+        public double LoadPerRequest => TotalRequests == 0 ? 0.0 : TotalLoad / TotalRequests;
+
+        public void Update(Response response, int payloadSize)
+        {
+            TotalRequests++;
+            TotalLoad += payloadSize;
+            AverageLoad = TotalLoad / TotalRequests;
+
+            if (response.IsSuccess)
+            {
+                SuccessfulRequests++;
+            }
+            else
+            {
+                FailedRequests++;
+
+                if (response.IsTimeout)
+                {
+                    TimeoutRequests++;
+                }
+                else
+                {
+                    OtherErrorRequests++;
+                }
+            }
+
+            _totalLatencySum += response.LatencyMs;
+            AverageLatencyMs = (double)_totalLatencySum / TotalRequests;
+
+            if (response.LatencyMs > MaxLatencyMs)
+            {
+                MaxLatencyMs = response.LatencyMs;
+            }
+        }
+    }
+
+    public interface IMetricsCollector
+    {
+        void RegisterService(IService service);
+        void Record(Request request, Response response);
+        IReadOnlyCollection<ServiceMetrics> GetCurrentMetrics();
+        Dictionary<string, ServiceMetrics> GetMetricsByService();
+        double CalculateAverageLoadForServiceType(string serviceType);
+    }
+
+    public class InMemoryMetricsCollector : IMetricsCollector
+    {
+        private readonly Dictionary<string, ServiceMetrics> _metricsByService = new Dictionary<string, ServiceMetrics>();
+
+        public void RegisterService(IService service)
+        {
+            if (!_metricsByService.ContainsKey(service.Name))
+            {
+                _metricsByService[service.Name] = new ServiceMetrics(service.Name);
+            }
+        }
+
+        public void Record(Request request, Response response)
+        {
+            if (_metricsByService.TryGetValue(request.ServiceName, out var metrics))
+            {
+                metrics.Update(response, request.PayloadSize);
+            }
+        }
+
+        public IReadOnlyCollection<ServiceMetrics> GetCurrentMetrics()
+        {
+            return _metricsByService.Values;
+        }
+
+        public Dictionary<string, ServiceMetrics> GetMetricsByService()
+        {
+            return new Dictionary<string, ServiceMetrics>(_metricsByService);
+        }
+
+        public double CalculateAverageLoadForServiceType(string serviceType)
+        {
+            var relevantMetrics = _metricsByService
+                .Where(kvp => kvp.Key.StartsWith(serviceType))
+                .Select(kvp => kvp.Value)
+                .ToList();
+
+            if (relevantMetrics.Count == 0)
+                return 0.0;
+
+            double totalRequests = relevantMetrics.Sum(m => m.TotalRequests);
+            if (totalRequests == 0)
+                return 0.0;
+
+            return relevantMetrics.Sum(m => m.TotalLoad) / totalRequests;
+        }
+    }
+
+    // ============================
+    // 5. ОЦЕНКА "ЗДОРОВЬЯ" СЕРВИСА
+    // ============================
+    public enum ServiceHealth
+    {
+        Healthy,
+        Degraded,
+        Unhealthy
+    }
+
+    public class ServiceHealthEvaluator
+    {
+        public double MaxHealthyErrorRate { get; set; } = 0.05;
+        public double MaxDegradedErrorRate { get; set; } = 0.20;
+        public double MaxHealthyTimeoutRate { get; set; } = 0.02;
+        public double MaxDegradedTimeoutRate { get; set; } = 0.10;
+        public int MaxHealthyLatencyMs { get; set; } = 150;
+        public int MaxDegradedLatencyMs { get; set; } = 400;
+
+        public ServiceHealth Evaluate(ServiceMetrics metrics)
+        {
+            if (metrics.TotalRequests == 0)
+                return ServiceHealth.Healthy;
+
+            bool isUnhealthy = metrics.ErrorRate > MaxDegradedErrorRate ||
+                              metrics.TimeoutRate > MaxDegradedTimeoutRate ||
+                              metrics.AverageLatencyMs > MaxDegradedLatencyMs;
+
+            bool isDegraded = metrics.ErrorRate > MaxHealthyErrorRate ||
+                             metrics.TimeoutRate > MaxHealthyTimeoutRate ||
+                             metrics.AverageLatencyMs > MaxHealthyLatencyMs;
+
+            if (isUnhealthy)
+                return ServiceHealth.Unhealthy;
+            else if (isDegraded)
+                return ServiceHealth.Degraded;
+            else
+                return ServiceHealth.Healthy;
+        }
+    }
+
+    // ======================
+    // 6. ГЛАВНЫЙ МОДУЛЬ (Main)
+    // ======================
+    public class Program
+    {
+        private static readonly Random _random = new Random();
+
+        public static void Main(string[] args)
+        {
+            Console.WriteLine("=== Система мониторинга сервисов с АВТОМАТИЧЕСКИМ МАСШТАБИРОВАНИЕМ ===\n");
+            Console.WriteLine("Вариант 19: Автоматическое масштабирование (Auto-Scaling)\n");
+
+            //Создаем менеджер авто-масштабирования
+            var scalingManager = new AutoScalingManager();
+
+            //Создаем сборщик метрик
+            IMetricsCollector metricsCollector = new InMemoryMetricsCollector();
+
+            //Регистрируем начальные инстансы в метриках
+            foreach (var fastInstance in scalingManager.GetAllInstances("FastService"))
+            {
+                metricsCollector.RegisterService(fastInstance);
+            }
+            foreach (var slowInstance in scalingManager.GetAllInstances("SlowService"))
+            {
+                metricsCollector.RegisterService(slowInstance);
+            }
+
+            ServiceHealthEvaluator healthEvaluator = new ServiceHealthEvaluator();
+
+            //Генерируем запросы с разной нагрузкой
+            List<Request> requests = GenerateRequests(120);
+
+            Console.WriteLine("Начальное состояние системы:");
+            Console.WriteLine($"- FastService инстансов: {scalingManager.GetInstanceCount("FastService")}");
+            Console.WriteLine($"- SlowService инстансов: {scalingManager.GetInstanceCount("SlowService")}");
+            Console.WriteLine();
+
+            int requestCount = 0;
+            foreach (var request in requests)
+            {
+                requestCount++;
+
+                try
+                {
+                    //Определяем тип сервиса по имени
+                    string serviceType = request.ServiceName.Contains("Fast") ? "FastService" : "SlowService";
+
+                    //Получаем инстанс сервиса через менеджер масштабирования
+                    IService service = scalingManager.GetServiceInstance(serviceType);
+
+                    //Создаем запрос с правильным именем сервиса
+                    var adjustedRequest = new Request(service.Name, request.PayloadSize, request.DeadlineMs);
+
+                    //Обрабатываем запрос
+                    Response response = service.Process(adjustedRequest);
+
+                    //Записываем метрики
+                    metricsCollector.Record(adjustedRequest, response);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка обработки запроса: {ex.Message}");
+                }
+
+                //Периодически выполняем авто-масштабирование и выводим статус (каждые 15 запросов)
+                if (requestCount % 15 == 0)
+                {
+                    Console.WriteLine($"\n--- Проверка авто-масштабирования (запрос #{requestCount}) ---");
+
+                    //Проверяем и выполняем авто-масштабирование для каждого типа сервиса
+                    var metricsDict = ((InMemoryMetricsCollector)metricsCollector).GetMetricsByService();
+
+                    //Для FastService
+                    double fastServiceLoad = metricsCollector.CalculateAverageLoadForServiceType("FastService");
+                    scalingManager.PerformAutoScaling("FastService", fastServiceLoad, metricsDict);
+
+                    //Для SlowService
+                    double slowServiceLoad = metricsCollector.CalculateAverageLoadForServiceType("SlowService");
+                    scalingManager.PerformAutoScaling("SlowService", slowServiceLoad, metricsDict);
+
+                    //Выводим текущий статус
+                    PrintCurrentStatus(scalingManager, metricsCollector, healthEvaluator);
+                }
+            }
+
+            //Финальный вывод
+            Console.WriteLine("\n" + new string('=', 50));
+            Console.WriteLine("=== ФИНАЛЬНЫЕ МЕТРИКИ И РЕЗУЛЬТАТЫ МАСШТАБИРОВАНИЯ ===");
+
+            PrintCurrentStatus(scalingManager, metricsCollector, healthEvaluator);
+
+            //История изменений инстансов
+            scalingManager.PrintScalingHistory();
+
+            //Влияние масштабирования на производительность
+            PrintScalingImpactAnalysis(scalingManager, metricsCollector);
+        }
+
+        private static List<Request> GenerateRequests(int count)
+        {
+            var requests = new List<Request>();
+            string[] services = { "FastService", "SlowService" };
+
+            //Разные профили нагрузки для тестирования авто-масштабирования
+            //Первая половина - высокая нагрузка, вторая - низкая
+            int highLoadPhase = count * 2 / 3;
+
+            for (int i = 0; i < count; i++)
+            {
+                string serviceName = services[_random.Next(services.Length)];
+
+                //Меняем размер нагрузки в зависимости от фазы
+                int payloadSize;
+                if (i < highLoadPhase)
+                {
+                    //Фаза высокой нагрузки (для тестирования масштабирования вверх)
+                    payloadSize = _random.Next(200, 800);
+                }
+                else
+                {
+                    //Фаза низкой нагрузки (для тестирования масштабирования вниз)
+                    payloadSize = _random.Next(20, 100);
+                }
+
+                int? deadline = _random.Next(0, 100) < 70 ? _random.Next(50, 1000) : null;
+
+                requests.Add(new Request(serviceName, payloadSize, deadline));
+            }
+
+            return requests;
+        }
+
+        private static void PrintCurrentStatus(AutoScalingManager scalingManager,
+                                             IMetricsCollector metricsCollector,
+                                             ServiceHealthEvaluator healthEvaluator)
+        {
+            var metrics = metricsCollector.GetCurrentMetrics();
+
+            Console.WriteLine($"\n=== СТАТУС СИСТЕМЫ ({DateTime.Now:HH:mm:ss}) ===");
+
+            //Группируем метрики по типу сервиса
+            var fastServiceMetrics = metrics.Where(m => m.ServiceName.StartsWith("FastService")).ToList();
+            var slowServiceMetrics = metrics.Where(m => m.ServiceName.StartsWith("SlowService")).ToList();
+
+            PrintServiceGroupStatus("FastService", fastServiceMetrics,
+                                  scalingManager.GetInstanceCount("FastService"), healthEvaluator);
+            PrintServiceGroupStatus("SlowService", slowServiceMetrics,
+                                  scalingManager.GetInstanceCount("SlowService"), healthEvaluator);
+        }
+
+        private static void PrintServiceGroupStatus(string serviceType,
+                                                   List<ServiceMetrics> groupMetrics,
+                                                   int instanceCount,
+                                                   ServiceHealthEvaluator healthEvaluator)
+        {
+            Console.WriteLine($"\n--- {serviceType.ToUpper()} (инстансов: {instanceCount}) ---");
+
+            if (groupMetrics.Count == 0)
+            {
+                Console.WriteLine("   Нет данных о метриках");
+                return;
+            }
+
+            //Агрегированные метрики по всем инстансам
+            int totalRequests = groupMetrics.Sum(m => m.TotalRequests);
+            int successfulRequests = groupMetrics.Sum(m => m.SuccessfulRequests);
+            int failedRequests = groupMetrics.Sum(m => m.FailedRequests);
+            double avgLatency = totalRequests > 0 ?
+                groupMetrics.Sum(m => m.AverageLatencyMs * m.TotalRequests) / totalRequests : 0;
+            double avgLoad = totalRequests > 0 ?
+                groupMetrics.Sum(m => m.AverageLoad * m.TotalRequests) / totalRequests : 0;
+
+            Console.WriteLine($"   Всего запросов: {totalRequests} | Успешных: {successfulRequests} | Ошибок: {failedRequests}");
+            Console.WriteLine($"   Средняя задержка: {avgLatency:F0}ms | Средняя нагрузка: {avgLoad:F1}");
+
+            //Оценка здоровья худшего инстанса
+            ServiceHealth worstHealth = ServiceHealth.Healthy;
+            foreach (var metric in groupMetrics)
+            {
+                var health = healthEvaluator.Evaluate(metric);
+                if (health > worstHealth)
+                {
+                    worstHealth = health;
+                }
+            }
+
+            Console.WriteLine($"   Состояние группы: {worstHealth}");
+
+            //Детали по каждому инстансу (если их больше одного)
+            if (groupMetrics.Count > 1)
+            {
+                Console.WriteLine($"   Детали по инстансам:");
+                foreach (var metric in groupMetrics.OrderBy(m => m.ServiceName))
+                {
+                    var health = healthEvaluator.Evaluate(metric);
+                    Console.WriteLine($"     - {metric.ServiceName}: {metric.TotalRequests} запр., " +
+                                    $"{metric.AverageLatencyMs:F0}ms, " +
+                                    $"{metric.AverageLoad:F1} нагрузка, " +
+                                    $"{health}");
+                }
+            }
+        }
+
+        private static void PrintScalingImpactAnalysis(AutoScalingManager scalingManager,
+                                                      IMetricsCollector metricsCollector)
+        {
+            Console.WriteLine("\n=== АНАЛИЗ ВЛИЯНИЯ МАСШТАБИРОВАНИЯ ===");
+
+            var metrics = metricsCollector.GetCurrentMetrics();
+            var metricsByService = ((InMemoryMetricsCollector)metricsCollector).GetMetricsByService();
+
+            string[] serviceTypes = { "FastService", "SlowService" };
+
+            foreach (var serviceType in serviceTypes)
+            {
+                var serviceInstances = scalingManager.GetAllInstances(serviceType);
+                var serviceMetrics = metrics.Where(m => m.ServiceName.StartsWith(serviceType)).ToList();
+
+                if (serviceMetrics.Count > 0)
+                {
+                    Console.WriteLine($"\n{serviceType}:");
+                    Console.WriteLine($"   Всего инстансов: {serviceInstances.Count}");
+
+                    if (serviceInstances.Count > 1)
+                    {
+                        //Анализируем распределение нагрузки
+                        Console.WriteLine($"   Распределение запросов между инстансами:");
+                        foreach (var instance in serviceInstances)
+                        {
+                            if (metricsByService.TryGetValue(instance.Name, out var instanceMetrics))
+                            {
+                                double loadShare = (double)instanceMetrics.TotalRequests /
+                                                 serviceMetrics.Sum(m => m.TotalRequests) * 100;
+                                Console.WriteLine($"     - {instance.Name}: {instanceMetrics.TotalRequests} запросов " +
+                                                $"({loadShare:F1}% от общего количества)");
+                            }
+                        }
+
+                        //Сравниваем производительность
+                        if (serviceInstances.Count >= 2)
+                        {
+                            var sortedByLatency = serviceMetrics
+                                .Where(m => m.TotalRequests > 0)
+                                .OrderBy(m => m.AverageLatencyMs)
+                                .ToList();
+
+                            if (sortedByLatency.Count >= 2)
+                            {
+                                double fastestLatency = sortedByLatency.First().AverageLatencyMs;
+                                double slowestLatency = sortedByLatency.Last().AverageLatencyMs;
+                                double latencyDifference = slowestLatency - fastestLatency;
+
+                                Console.WriteLine($"   Разница в задержках между инстансами: " +
+                                                $"{latencyDifference:F0}ms " +
+                                                $"(от {fastestLatency:F0}ms до {slowestLatency:F0}ms)");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
